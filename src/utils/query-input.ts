@@ -4,6 +4,7 @@ import autocompletePrompt from 'inquirer-autocomplete-prompt';
 import { highlightSQL, highlightMongoDB } from './syntax-highlighter';
 import { AutocompleteProvider } from './autocomplete';
 import { DatabaseClient } from '../database/factory';
+import { InteractiveEditor } from './interactive-editor';
 
 // Register the autocomplete prompt
 inquirer.registerPrompt('autocomplete', autocompletePrompt);
@@ -31,6 +32,11 @@ export class QueryInput {
       
       if (choice === 'new') {
         const query = await this.getNewQuery(options);
+        if (query && await this.confirmQuery(query, options.dbType)) {
+          return query;
+        }
+      } else if (choice === 'interactive') {
+        const query = await this.getInteractiveQuery(options);
         if (query && await this.confirmQuery(query, options.dbType)) {
           return query;
         }
@@ -65,9 +71,10 @@ export class QueryInput {
       { name: '✏️  Write single line query', value: 'new' },
     ];
 
-    // Add autocomplete option if available
+    // Add interactive editor option if available
     if (this.autocompleteProvider) {
-      choices.push({ name: '🔍 Query with autocomplete', value: 'autocomplete' });
+      choices.push({ name: '🎯 Interactive editor (recommended)', value: 'interactive' });
+      choices.push({ name: '🔍 Dropdown autocomplete', value: 'autocomplete' });
     }
 
     choices.push(
@@ -95,6 +102,37 @@ export class QueryInput {
     ]);
 
     return choice;
+  }
+
+  private async getInteractiveQuery(options: QueryInputOptions): Promise<string> {
+    if (!this.autocompleteProvider) {
+      console.log(chalk.yellow('Interactive editor not available, falling back to regular input'));
+      return this.getNewQuery(options);
+    }
+
+    console.log(chalk.cyan('\n🎯 Interactive SQL Editor'));
+    console.log(chalk.gray('Type your query with real-time suggestions:'));
+    console.log(chalk.gray('• Tab: Accept suggestion'));
+    console.log(chalk.gray('• ↑↓: Navigate suggestions'));
+    console.log(chalk.gray('• Enter: Execute query'));
+    console.log(chalk.gray('• Esc: Hide suggestions'));
+    console.log(chalk.gray('• Ctrl+C: Cancel\n'));
+
+    const editor = new InteractiveEditor({
+      prompt: `${options.dbType.toUpperCase()} >`,
+      dbType: options.dbType,
+      autocompleteProvider: this.autocompleteProvider
+    });
+
+    try {
+      const query = await editor.getInput();
+      return query;
+    } catch (error) {
+      if (error instanceof Error && error.message === 'User cancelled') {
+        return '';
+      }
+      throw error;
+    }
   }
 
   private async getNewQuery(options: QueryInputOptions): Promise<string> {
@@ -136,15 +174,17 @@ export class QueryInput {
           return this.autocompleteProvider!.getSuggestions(input);
         },
         pageSize: 8,
-        validate: (input: string) => {
-          const trimmed = input.trim();
+        validate: (input: any) => {
+          // Handle both string and object inputs from autocomplete
+          const value = typeof input === 'string' ? input : (input?.value || input || '');
+          const trimmed = String(value).trim();
           if (trimmed.length === 0) return 'Query cannot be empty';
           return true;
         }
       }
     ]);
 
-    return query.trim();
+    return String(query).trim();
   }
 
   private async selectQuickQuery(options: QueryInputOptions): Promise<string> {
@@ -428,7 +468,21 @@ export class QueryInput {
   }
 
   private async confirmQuery(query: string, dbType: string): Promise<boolean> {
-    console.log(chalk.cyan.bold('\n🔍 Query Preview:'));
+    // Check if query is safe (doesn't require confirmation)
+    const isSafeQuery = this.isSafeQuery(query);
+    
+    if (isSafeQuery) {
+      // Show brief preview for safe queries and execute directly
+      console.log(chalk.cyan.bold('\n🔍 Query Preview:'));
+      console.log(chalk.gray('─'.repeat(50)));
+      console.log(this.highlightQuery(query, dbType));
+      console.log(chalk.gray('─'.repeat(50)));
+      console.log(chalk.green('✅ Safe query - executing directly...\n'));
+      return true;
+    }
+
+    // Show full confirmation for potentially dangerous queries
+    console.log(chalk.yellow.bold('\n⚠️  Potentially Dangerous Query:'));
     console.log(chalk.gray('═'.repeat(80)));
     console.log(this.highlightQuery(query, dbType));
     console.log(chalk.gray('═'.repeat(80)));
@@ -439,6 +493,7 @@ export class QueryInput {
     const words = query.split(/\s+/).filter(w => w.length > 0).length;
     
     console.log(chalk.gray(`📊 Stats: ${lines} lines, ${words} words, ${chars} characters`));
+    console.log(chalk.red('⚠️  This query may modify or delete data!'));
 
     const { confirm } = await inquirer.prompt([
       {
@@ -459,6 +514,55 @@ export class QueryInput {
     }
 
     return confirm === true;
+  }
+
+  private isSafeQuery(query: string): boolean {
+    const normalizedQuery = query.trim().toLowerCase();
+    
+    // Safe query patterns (read-only operations)
+    const safePatterns = [
+      /^select\s/,           // SELECT queries
+      /^show\s/,             // SHOW commands
+      /^describe\s/,         // DESCRIBE commands
+      /^desc\s/,             // DESC commands
+      /^explain\s/,          // EXPLAIN commands
+      /^with\s.*select\s/,   // CTE with SELECT
+      /^db\.\w+\.find/,      // MongoDB find operations
+      /^db\.\w+\.aggregate/, // MongoDB aggregate operations
+      /^db\.\w+\.count/,     // MongoDB count operations
+      /^db\.\w+\.distinct/,  // MongoDB distinct operations
+    ];
+
+    // Dangerous query patterns (write operations)
+    const dangerousPatterns = [
+      /^insert\s/,           // INSERT
+      /^update\s/,           // UPDATE
+      /^delete\s/,           // DELETE
+      /^drop\s/,             // DROP
+      /^create\s/,           // CREATE
+      /^alter\s/,            // ALTER
+      /^truncate\s/,         // TRUNCATE
+      /^replace\s/,          // REPLACE
+      /^merge\s/,            // MERGE
+      /^db\.\w+\.insert/,    // MongoDB insert operations
+      /^db\.\w+\.update/,    // MongoDB update operations
+      /^db\.\w+\.delete/,    // MongoDB delete operations
+      /^db\.\w+\.remove/,    // MongoDB remove operations
+      /^db\.\w+\.drop/,      // MongoDB drop operations
+    ];
+
+    // Check for dangerous patterns first
+    if (dangerousPatterns.some(pattern => pattern.test(normalizedQuery))) {
+      return false;
+    }
+
+    // Check for safe patterns
+    if (safePatterns.some(pattern => pattern.test(normalizedQuery))) {
+      return true;
+    }
+
+    // If no pattern matches, be conservative and ask for confirmation
+    return false;
   }
 
   private highlightQuery(query: string, dbType: string): string {
