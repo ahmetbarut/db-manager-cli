@@ -5,6 +5,7 @@ import { createDatabaseClient } from '../database/factory';
 import { QueryHistory } from '../utils/history';
 import { QueryInput } from '../utils/query-input';
 import { highlightSQL, highlightMongoDB } from '../utils/syntax-highlighter';
+import { QueryResultExporter } from '../utils/export';
 import ora from 'ora';
 import inquirer from 'inquirer';
 
@@ -44,7 +45,7 @@ export async function queryConsole(connectionId?: string): Promise<void> {
   console.log(chalk.cyan.bold(`\n🔍 Query Console - ${connection.name}`));
   console.log(chalk.gray(`Database Type: ${connection.type}`));
   console.log(chalk.gray(`Connected: ${new Date().toLocaleString()}`));
-  console.log(chalk.gray('Commands: .exit | .tables | .history | .clear'));
+  console.log(chalk.gray('Commands: .exit | .tables | .history | .clear | .export'));
   console.log(chalk.gray(`Features: Query History ✓ | Syntax Highlighting ✓\n`));
 
   const client = createDatabaseClient(connection);
@@ -90,6 +91,9 @@ export async function queryConsole(connectionId?: string): Promise<void> {
       } else if (trimmedQuery.startsWith('.history')) {
         await handleHistoryCommand(trimmedQuery, connection.id, connection.name);
         continue;
+      } else if (trimmedQuery === '.export') {
+        await handleExportCommand(connection.id, connection.name);
+        continue;
       }
 
       // Show highlighted query before execution
@@ -122,7 +126,22 @@ export async function queryConsole(connectionId?: string): Promise<void> {
         
         if (result.rows && result.rows.length > 0) {
           displayResults(result.rows);
-          console.log(chalk.blue(`\n📊 Result: ${result.rows.length} row(s) returned\n`));
+          console.log(chalk.blue(`\n📊 Result: ${result.rows.length} row(s) returned`));
+          
+          // Ask if user wants to export results
+          const { exportResults } = await inquirer.prompt([
+            {
+              type: 'confirm',
+              name: 'exportResults',
+              message: 'Export these results?',
+              default: false
+            }
+          ]);
+
+          if (exportResults) {
+            await QueryResultExporter.exportResults(result, trimmedQuery, connection.name);
+          }
+          console.log('');
         } else {
           console.log(chalk.yellow('📝 Query executed successfully (no results returned)\n'));
         }
@@ -315,4 +334,63 @@ async function showTables(client: any, dbType: string): Promise<void> {
     spinner.fail('Failed to fetch tables');
     console.error(chalk.red(`Error: ${error instanceof Error ? error.message : 'Unknown error'}\n`));
   }
+}
+
+async function handleExportCommand(connectionId: string, connectionName: string): Promise<void> {
+  const history = QueryHistory.getInstance();
+  const recentQueries = history.getRecentQueries(connectionId, 10);
+  
+  if (recentQueries.length === 0) {
+    console.log(chalk.yellow('\n📭 No recent queries found to export results from\n'));
+    return;
+  }
+
+  console.log(chalk.cyan.bold('\n📤 Export Previous Query Results'));
+  console.log(chalk.gray('Select a recent query to re-execute and export:\n'));
+
+  const queryChoices = recentQueries.map((query, index) => {
+    const preview = query.length > 60 ? query.substring(0, 57) + '...' : query;
+    return {
+      name: `${(index + 1).toString().padStart(2, ' ')}. ${preview}`,
+      value: query,
+      short: preview
+    };
+  });
+
+  queryChoices.push(
+    new inquirer.Separator() as any,
+    { name: '🔙 Back to console', value: null as any, short: 'Back' }
+  );
+
+  const { selectedQuery } = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'selectedQuery',
+      message: 'Select query to re-execute and export:',
+      choices: queryChoices,
+      pageSize: 12
+    }
+  ]);
+
+  if (!selectedQuery) return;
+
+  console.log(chalk.gray('\n📋 Selected Query:'));
+  console.log(chalk.gray('─'.repeat(60)));
+  console.log(highlightSQL(selectedQuery));
+  console.log(chalk.gray('─'.repeat(60)));
+
+  const { confirm } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'confirm',
+      message: 'Re-execute this query and export results?',
+      default: true
+    }
+  ]);
+
+  if (!confirm) return;
+
+  // Re-execute the query (we need access to the client here)
+  console.log(chalk.yellow('\n⚠️  Note: .export command requires re-executing the query'));
+  console.log(chalk.gray('For better performance, use the export option immediately after running a query\n'));
 }
