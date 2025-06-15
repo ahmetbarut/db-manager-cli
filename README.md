@@ -225,7 +225,7 @@ src/
 
 - [ ] **Multi-line interactive editing**
 - [ ] **Syntax error highlighting**
-- [ ] **Query result export** (CSV, JSON)
+- [x] **Query result export** (CSV, JSON)
 - [ ] **Database schema visualization**
 - [ ] **Custom query snippets**
 - [ ] **Query performance analysis**
